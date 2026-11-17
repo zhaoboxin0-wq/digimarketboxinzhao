@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Chat Studio 免費工作室</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen py-6 px-4 font-sans">
+  <div id="app" class="max-w-5xl mx-auto"></div>
+
+  <script>
+    const CONFIG = {"global":{"studioNameZh":"AI Chat Studio 免費工作室","studioNameEn":"AI Chat Studio (Free)","layout":"split","theme":"light","accent":"#4f46e5","includeBilingual":true},"blocks":[{"id":"blk_d7ta4sm","type":"header","props":{"titleZh":"AI Chat Studio 免費工作室","titleEn":"AI Chat Studio (Free)","subtitleZh":"由 OpenRouter 免費模型驅動","subtitleEn":"Powered by OpenRouter Free Models"}},{"id":"blk_loyr4z0","type":"apikey","props":{"labelZh":"OpenRouter API 金鑰","labelEn":"OpenRouter API Key","placeholder":"sk-or-v1-..."}},{"id":"blk_cpy1z98","type":"model","props":{"labelZh":"選擇模型 (免費且快速)","labelEn":"Model (Free & Fast)","models":"openrouter/free, nvidia/nemotron-3.5-super-vl:free, nvidia/nemotron-3.5-lightning:free, nvidia/nemotron-3-ultra-550b-a55b:free, cohere/north-mini-code:free, google/gemma-4-31b-it:free, google/gemma-4-26b-a4b-it:free"}},{"id":"blk_kovy31c","type":"system","props":{"labelZh":"系統提示詞 (System Prompt)","labelEn":"System Prompt","defaultPrompt":"你是一位專業的中英文雙語翻譯官，請提供自然、流暢且準確的翻譯結果。"}},{"id":"blk_9io3y3z","type":"prompts","props":{"labelZh":"常用快捷指令","labelEn":"Quick Prompts","buttons":"翻譯成繁體中文, 翻譯成英文, 改寫為專業商務語氣"}},{"id":"blk_q6q9x86","type":"chat","props":{"welcomeZh":"你好！已預設使用免費模型 (openrouter/free)，請輸入金鑰即可開始對話。","welcomeEn":"Hello! Using free model (openrouter/free). Enter your API key to chat.","placeholderZh":"請輸入訊息...","placeholderEn":"Type a message..."}},{"id":"blk_oqtnm56","type":"footer","props":{"textZh":"由 OpenRouter API 驅動 (瀏覽器端運作) • 請勿在 :free 免費模型輸入敏感資料","textEn":"Powered by OpenRouter API (Client-Side) • Avoid sharing sensitive data on :free models"}},{"id":"blk_jgsok6w","type":"params","props":{"labelZh":"溫度 (Temperature)","labelEn":"Temperature","defaultTemp":"0.7"}}]};
+    const CATALOG = [{"id":"openrouter/free","scene":"日常通用／最穩定（預設）","ctx":"動態","note":"自動選擇當下可用且快速的免費模型"},{"id":"nvidia/nemotron-3.5-super-vl:free","scene":"高速問答與長文","ctx":"1M","note":"回應速度極快（約 0.7–0.9 秒）"},{"id":"nvidia/nemotron-3.5-lightning:free","scene":"極速對話","ctx":"1M","note":"專為低延遲快速回應最佳化"},{"id":"nvidia/nemotron-3-ultra-550b-a55b:free","scene":"深度推理與邏輯","ctx":"1M","note":"550B 參數級強大推理模型"},{"id":"cohere/north-mini-code:free","scene":"程式設計與除錯","ctx":"256K","note":"專精程式碼生成的輕量模型"},{"id":"google/gemma-4-31b-it:free","scene":"多語言與繁中寫作","ctx":"262K","note":"中英文語意理解與翻譯表現優異"},{"id":"google/gemma-4-26b-a4b-it:free","scene":"輕快全能助手","ctx":"262K","note":"速度與品質均衡的通用模型"}];
+    let lang = 'zh';
+    let apiKey = localStorage.getItem('or_api_key') || '';
+    let model = 'openrouter/free';
+    let systemPrompt = '';
+    let kbText = '';
+    let kbName = '';
+    let temperature = 0.7;
+    let messages = [];
+    let abortCtrl = null;
+    let isGen = false;
+    let showGuide = false;
+
+    function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function toAscii(s, fb) { const c = String(s||'').replace(/[^\x20-\x7E]/g,'').trim(); return c || fb; }
+    function toggleLang() { lang = lang === 'zh' ? 'en' : 'zh'; render(); }
+
+    async function refreshFree() {
+      try {
+        const r = await fetch('https://openrouter.ai/api/v1/models');
+        const d = await r.json();
+        const fetched = (d.data||[]).filter(m=>m.id==='openrouter/free'||m.id.endsWith(':free')||(parseFloat(m.pricing?.prompt)===0&&parseFloat(m.pricing?.completion)===0)).map(m=>m.id);
+        const list = Array.from(new Set([...CATALOG.map(c=>c.id), ...fetched]));
+        const blk = CONFIG.blocks.find(b=>b.type==='model');
+        if (blk && list.length) { blk.props.models = list.slice(0,25).join(', '); render(); }
+      } catch(e) { alert('Failed to fetch free models'); }
+    }
+
+    function uploadKb(inp) {
+      const f = inp.files[0]; if (!f) return;
+      const rd = new FileReader();
+      rd.onload = e => { kbText = e.target.result; kbName = f.name; render(); };
+      rd.readAsText(f);
+    }
+
+    function exportMd() {
+      const md = messages.map(m => '### ' + (m.role==='user'?'User':'AI') + '\n' + m.content + '\n').join('\n');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([md], {type:'text/markdown'}));
+      a.download = 'chat-export.md';
+      a.click();
+    }
+
+    function stopGen() { if (abortCtrl) { abortCtrl.abort(); abortCtrl=null; isGen=false; render(); } }
+
+    function renderBlock(b) {
+      const p = b.props;
+      const isZh = lang === 'zh';
+      const isLight = CONFIG.global.theme === 'light';
+      const card = isLight ? 'bg-white border-slate-200 shadow-sm' : 'bg-slate-900/90 border-slate-800';
+      const inp = isLight ? 'bg-slate-50 border-slate-300 text-slate-900' : 'bg-slate-950 border-slate-700 text-slate-100';
+      const accent = CONFIG.global.accent;
+
+      if (b.type === 'header') {
+        return `<div class="p-5 rounded-2xl border ${card} flex items-center justify-between gap-2 flex-wrap">
+          <div><h1 class="text-xl font-bold" style="color:${accent}">${esc(isZh ? p.titleZh : p.titleEn)}</h1>
+          <p class="text-xs opacity-70 mt-0.5">${esc(isZh ? p.subtitleZh : p.subtitleEn)}</p></div>
+          <div class="flex items-center gap-2">
+            <span class="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 text-[11px] font-bold">🆓 ${esc(model)}</span>
+            ${CONFIG.global.includeBilingual ? `<button onclick="toggleLang()" class="px-3 py-1.5 rounded-xl border border-slate-300/60 text-xs font-medium">🌐 ${isZh ? 'EN' : '繁體中文'}</button>` : ''}
+          </div>
+        </div>`;
+      } else if (b.type === 'apikey') {
+        return `<div class="p-4 rounded-2xl border ${card} space-y-2">
+          <div class="flex justify-between items-center"><label class="text-xs font-bold">🔑 ${esc(isZh ? p.labelZh : p.labelEn)}</label>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${apiKey?'bg-emerald-500/15 text-emerald-600':'bg-slate-500/15 text-slate-500'}">${apiKey?(isZh?'已連線':'Connected'):(isZh?'未連線':'Not Connected')}</span></div>
+          <div class="flex gap-1.5"><input type="password" value="${esc(apiKey)}" placeholder="${esc(p.placeholder)}" oninput="apiKey=this.value.trim(); localStorage.setItem('or_api_key', this.value.trim())" class="flex-1 px-3 py-2 rounded-xl border text-xs ${inp}" />
+          <button onclick="apiKey=''; localStorage.removeItem('or_api_key'); render()" class="px-2.5 py-1.5 rounded-xl border border-slate-300/50 text-[11px]">${isZh?'清除':'Clear'}</button></div>
+          <p class="text-[10px] opacity-65">${isZh?'僅儲存於瀏覽器本機。免費申請金鑰：':'Stored locally. Get a free key at '}<a href="https://openrouter.ai/keys" target="_blank" class="underline text-indigo-500">openrouter.ai/keys</a></p>
+        </div>`;
+      } else if (b.type === 'model') {
+        const list = p.models.split(',').map(x=>x.trim()).filter(m=>m==='openrouter/free'||m.endsWith(':free'));
+        if (!list.length) list.push('openrouter/free');
+        if (!list.includes(model)) model = list[0];
+        const meta = CATALOG.find(c=>c.id===model);
+        return `<div class="p-4 rounded-2xl border ${card} space-y-2">
+          <div class="flex justify-between items-center"><label class="text-xs font-bold">🆓 ${esc(isZh ? p.labelZh : p.labelEn)}</label>
+          <div class="flex gap-1.5"><button onclick="showGuide=!showGuide; render()" class="px-2 py-0.5 rounded-lg border border-slate-300/50 text-[10px]">${isZh?'模型一覽':'Guide'}</button><button onclick="refreshFree()" class="px-2 py-0.5 rounded-lg border border-slate-300/50 text-xs">↻</button></div></div>
+          <select onchange="model=this.value; render()" class="w-full px-3 py-2 rounded-xl border text-xs ${inp}">
+            ${list.map(m=>{ const c=CATALOG.find(x=>x.id===m); return `<option value="${esc(m)}" ${m===model?'selected':''}>${c ? esc(m+'（'+c.scene+'・'+c.ctx+'）') : esc(m)}</option>`; }).join('')}
+          </select>
+          ${meta ? `<div class="text-[11px] px-2.5 py-1.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20"><b>${esc(meta.scene)}</b> • Context: ${esc(meta.ctx)} • ${esc(meta.note)}</div>` : ''}
+          ${showGuide ? `<div class="overflow-x-auto border border-slate-200/60 rounded-xl"><table class="w-full text-left text-[10px]"><thead class="bg-slate-500/10"><tr><th class="p-1.5">模型 ID</th><th class="p-1.5">適用場景</th><th class="p-1.5">上下文</th><th class="p-1.5">備註</th></tr></thead><tbody>${CATALOG.map(c=>`<tr class="border-t border-slate-200/40 cursor-pointer hover:bg-indigo-500/10" onclick="model='${c.id}';render()"><td class="p-1.5 font-mono font-semibold">${esc(c.id)}</td><td class="p-1.5">${esc(c.scene)}</td><td class="p-1.5">${esc(c.ctx)}</td><td class="p-1.5">${esc(c.note)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        </div>`;
+      } else if (b.type === 'kb') {
+        return `<div class="p-4 rounded-2xl border ${card} space-y-2">
+          <div class="flex justify-between items-center"><span class="text-xs font-bold">📄 ${esc(isZh?p.labelZh:p.labelEn)}</span><span class="text-[10px] font-bold">${kbText?kbText.length+' chars':'Off'}</span></div>
+          <div class="flex gap-2"><label class="flex-1 cursor-pointer text-center py-1.5 px-3 rounded-xl border border-dashed border-slate-300 text-[11px]">${kbName?esc(kbName):(isZh?'上傳 .txt / .md':'Upload .txt / .md')}<input type="file" accept=".txt,.md" onchange="uploadKb(this)" class="hidden" /></label>
+          ${kbText?`<button onclick="kbText='';kbName='';render()" class="px-2.5 py-1.5 rounded-xl border border-slate-300/50 text-[11px]">${isZh?'清除':'Clear'}</button>`:''}</div>
+        </div>`;
+      } else if (b.type === 'system') {
+        if (!systemPrompt) systemPrompt = p.defaultPrompt;
+        return `<div class="p-4 rounded-2xl border ${card}">
+          <label class="block text-xs font-bold mb-1.5">🎭 ${esc(isZh ? p.labelZh : p.labelEn)}</label>
+          <textarea rows="2" oninput="systemPrompt=this.value" class="w-full px-3 py-2 rounded-xl border text-xs ${inp}">${esc(systemPrompt)}</textarea>
+        </div>`;
+      } else if (b.type === 'prompts') {
+        const btns = p.buttons.split(',').map(x=>x.trim()).filter(Boolean);
+        return `<div class="p-4 rounded-2xl border ${card}">
+          <div class="text-xs font-bold mb-2">⚡ ${esc(isZh ? p.labelZh : p.labelEn)}</div>
+          <div class="flex flex-wrap gap-1.5">
+            ${btns.map(bt=>`<button onclick="sendMsg('${esc(bt)}')" class="px-3 py-1.5 rounded-xl text-xs font-medium text-white" style="background:${accent}">${esc(bt)}</button>`).join('')}
+          </div>
+        </div>`;
+      } else if (b.type === 'params') {
+        return `<div class="p-4 rounded-2xl border ${card}">
+          <div class="flex justify-between text-xs font-bold mb-1"><span>🎛️ ${esc(isZh ? p.labelZh : p.labelEn)}</span><span id="tv">${temperature}</span></div>
+          <input type="range" min="0" max="2" step="0.1" value="${temperature}" oninput="temperature=parseFloat(this.value); document.getElementById('tv').textContent=this.value" class="w-full" />
+        </div>`;
+      } else if (b.type === 'chat') {
+        return `<div class="rounded-2xl border ${card} overflow-hidden flex flex-col">
+          <div class="px-4 py-2 border-b ${isLight?'border-slate-100':'border-slate-800'} flex justify-between text-[11px]">
+            <button onclick="messages=[];render()">+ ${isZh?'新對話':'New'}</button>
+            <button onclick="exportMd()">⬇ ${isZh?'匯出對話 (.md)':'Export Chat (.md)'}</button>
+          </div>
+          <div id="chatLog" class="p-4 space-y-3 h-96 overflow-y-auto text-sm">
+            <div class="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs">${esc(isZh ? p.welcomeZh : p.welcomeEn)}</div>
+            ${messages.map(m=>`<div class="flex ${m.role==='user'?'justify-end':'justify-start'}">
+              <div class="max-w-[85%] px-4 py-2.5 rounded-2xl whitespace-pre-wrap text-xs ${m.role==='user'?'text-white':(isLight?'bg-slate-100 text-slate-800':'bg-slate-800')}"
+                   style="${m.role==='user'?'background:'+accent:''}">${esc(m.content)}</div>
+            </div>`).join('')}
+          </div>
+          <div class="p-3 border-t ${isLight?'border-slate-200':'border-slate-800'} flex gap-2">
+            <input id="chatInp" type="text" placeholder="${esc(isZh ? p.placeholderZh : p.placeholderEn)}"
+                   onkeydown="if(event.key==='Enter') sendMsg()" class="flex-1 px-3 py-2 rounded-xl border text-xs ${inp}" />
+            ${isGen?`<button onclick="stopGen()" class="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-500">${isZh?'停止':'Stop'}</button>`:`<button onclick="sendMsg()" class="px-4 py-2 rounded-xl text-xs font-bold text-white" style="background:${accent}">${isZh?'發送':'Send'}</button>`}
+          </div>
+        </div>`;
+      } else if (b.type === 'empty') {
+        const title = isZh ? p.titleZh : p.titleEn;
+        const content = isZh ? p.contentZh : p.contentEn;
+        if (!title && !content) return `<div style="height:${parseInt(p.height)||24}px"></div>`;
+        return `<div class="p-4 rounded-2xl border ${card}">${title?`<div class="font-bold text-xs mb-1">${esc(title)}</div>`:''}${content?`<div class="text-xs opacity-80 whitespace-pre-wrap">${esc(content)}</div>`:''}</div>`;
+      } else if (b.type === 'footer') {
+        return `<div class="text-center text-xs opacity-60 py-2">${esc(isZh ? p.textZh : p.textEn)}</div>`;
+      }
+      return '';
+    }
+
+    function render() {
+      const layout = CONFIG.global.layout || 'single';
+      const isLight = CONFIG.global.theme === 'light';
+      let html = '';
+
+      if (layout === 'split') {
+        const headers = CONFIG.blocks.filter(b => b.type === 'header').map(renderBlock).join('');
+        const footers = CONFIG.blocks.filter(b => b.type === 'footer').map(renderBlock).join('');
+        const lefts = CONFIG.blocks.filter(b => ['apikey', 'model', 'kb', 'system', 'params', 'prompts', 'empty'].includes(b.type)).map(renderBlock).join('');
+        const rights = CONFIG.blocks.filter(b => b.type === 'chat').map(renderBlock).join('');
+        html = `<div class="space-y-4">${headers}<div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-start"><div class="md:col-span-5 space-y-3">${lefts}</div><div class="md:col-span-7 space-y-3">${rights}</div></div>${footers}</div>`;
+      } else if (layout === 'card') {
+        html = `<div class="p-6 rounded-3xl shadow-xl border ${isLight ? 'bg-white border-slate-200' : 'bg-slate-900 border-slate-800'} space-y-3">${CONFIG.blocks.map(renderBlock).join('')}</div>`;
+      } else {
+        html = `<div class="space-y-3">${CONFIG.blocks.map(renderBlock).join('')}</div>`;
+      }
+
+      document.getElementById('app').innerHTML = html;
+      const log = document.getElementById('chatLog');
+      if (log) log.scrollTop = log.scrollHeight;
+    }
+
+    async function sendMsg(preset) {
+      const inp = document.getElementById('chatInp');
+      const text = preset || (inp ? inp.value.trim() : '');
+      if (!text || isGen) return;
+      if (!apiKey) return alert(lang === 'zh' ? '請先輸入您的 OpenRouter API 金鑰！' : 'Please enter your OpenRouter API Key!');
+      if (inp && !preset) inp.value = '';
+
+      messages.push({ role: 'user', content: text });
+      messages.push({ role: 'assistant', content: '⏳ 思考中...' });
+      isGen = true;
+      abortCtrl = new AbortController();
+      render();
+
+      try {
+        const payload = [];
+        let sys = systemPrompt || '';
+        if (kbText) sys += '\n\n[Knowledge Base ('+kbName+')]:\n' + kbText.slice(0,12000);
+        if (sys.trim()) payload.push({ role: 'system', content: sys.trim() });
+        messages.slice(0, -1).forEach(m => payload.push(m));
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          signal: abortCtrl.signal,
+          headers: {
+            'Authorization': 'Bearer ' + toAscii(apiKey, ''),
+            'Content-Type': 'application/json',
+            'HTTP-Referer': toAscii(window.location.origin, 'https://openrouter.ai'),
+            'X-Title': toAscii(CONFIG.global.studioNameEn, 'AI Chat Studio')
+          },
+          body: JSON.stringify({ model: model || 'openrouter/free', messages: payload, temperature })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        messages[messages.length - 1].content = data.choices[0].message.content;
+      } catch (e) {
+        messages[messages.length - 1].content = e.name === 'AbortError' ? (lang==='zh'?'⏹️ 已停止。':'⏹️ Stopped.') : ('❌ 錯誤：' + e.message);
+      }
+      isGen = false;
+      abortCtrl = null;
+      render();
+    }
+
+    render();
+  </script>
+</body>
+</html>
